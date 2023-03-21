@@ -1,0 +1,474 @@
+initialize() {
+	
+	
+	if (exists("slimgui")) {
+		defineConstant("results_path_base", "~/Desktop/moving_opt_sims/");//where the output files will be saved
+		defineConstant("opt", 0.5); //the absolute distance of the optimum shift in males and females (the new female optimum is -1 * this value, while the new male optimum is this value)
+		defineConstant("fit_sd", 1);//the standard deviation of the gaussian fitness function in males and females
+		
+		defineConstant("period_length", 500);//the period of time between each shift in optimum
+		
+		//We provide a text file describing the recombination rates between 1000 loci on a Drosophila-like genome (see Methods). Note that for the simulations in the main text, we allow for male autosomal recombination.
+		defineConstant("female_map", "~/Desktop/linkage_maps/linkage_data_dros_female.txt");
+		defineConstant("male_map", "~/Desktop/linkage_maps/linkage_data_dros_male_with_male_rec.txt");
+	}
+	
+	defineConstant("distance", opt); //how far the optimum moves after ever shift; held constant at 0.5
+	defineConstant("burn_in_gens", 100000); //burn in period in which both males and females have an optimum of 0
+	defineConstant("moving_gens", 50000); //period during which the optimum will change ever 500 generations
+	
+	defineConstant("u", 10^(-5)); //per locus mutation rate
+	
+	defineConstant("female_sd", fit_sd); //female fitness sd
+	defineConstant("male_sd", fit_sd); //male fitness sd
+	
+	defineConstant("L", 1000); //total number of loci in genome
+	defineConstant("N", 10000); //number of individuals in the population 
+	defineConstant("length_x", 176);//length of the X chromosome (its proportional length relative to the autosomes is based on D. melanogaster genome)
+	
+	initializeMutationRate(u);
+	initializeMutationType("m1", 0.5, "f", 0.0); //autosomal mutations
+	initializeMutationType("m2", 0.5, "f", 0.0); //X-linked mutations
+	
+	
+	m1.convertToSubstitution = T;
+	m2.convertToSubstitution = F; // Because mutations on the X will never reach greater than 75% frequency, we have to turn them into substitutions manually
+	
+	initializeMutationType("m3", 1.0, "f", 0.0); // marker mutation that indentifies the Y chromosome
+	
+	initializeGenomicElementType("g2", m2, 1.0); //the X chromosome. Traditionally, the X is the first chromosome in Drosophila melanogaster linkage maps, so we have kept that arrangement here. Only m2 mutations can occur on the X. 
+	initializeGenomicElement(g2, 0, length_x-1);
+	
+	initializeGenomicElementType("g1", m1, 1.0); //the autosomes. Only m1 mutations occur on the autosomes.
+	initializeGenomicElement(g1, length_x, L-1);
+	
+	initializeSex("A"); //the entire genome is modelled autosomally, but we use a modify child callback to make sure the X is inherited appropriately. This is based on recipe 14.5 in the SLiM manual.	
+	
+	// The following code reads in female and male recombination rates from seperate files. 
+	lines = readFile(female_map);
+	female_rates = NULL;
+	for (line in lines)
+	{
+		components = strsplit(line, "\t");
+		female_rates = c(female_rates, asFloat(components[0]));
+	}
+	
+	initializeRecombinationRate(female_rates, 1:(L-1), sex="F");
+	
+	
+	// input male recombination
+	lines = readFile(male_map);
+	male_rates = NULL;
+	for (line in lines)
+	{
+		components = strsplit(line, "\t");
+		male_rates = c(male_rates, asFloat(components[0]));
+	}
+	
+	initializeRecombinationRate(male_rates, 1:(L-1), sex="M");
+	
+	
+	defineConstant("mu", c(0, 0)); //mean phenotypic effect of a new mutation in males and females
+	defineConstant("var_u", (0.25*10^-2)); //variance in mutational effects in both sexes
+	defineConstant("cov", 0.9*var_u); //covariance between mutational effects in the sexes
+	//note that the variance of the distribution of mutational effect sizes has been adjusted so that it is 1/4 of the value in the single genomic region only simulations
+	//this is because we assume additivity in these simulations and so, for computational speed in SLiM, it is faster to make the male and female effect of each mutation the heterozygous (or allelic) effect rather than the homozygous effect. By adjusting the variance of the mutational distribution by 1/4, we keep the same overall distribution of allelic effects in males and females across all simulations
+	
+	defineConstant("sigma", matrix(c(var_u,cov,cov,var_u), nrow=2)); //defines bivariate normal distribution from which male and female effect sizes are drawn
+	
+	defineConstant("extra", rdunif(1,0,100000)); //random number used as simulation "ID"
+	
+	//All definitions below are to organize the results files & the folders they are stored in
+	createDirectory(results_path_base);
+	defineConstant("results_path", results_path_base+"/"+extra+"/");
+	createDirectory(results_path);
+	defineConstant("simulation_info", ("moving_opt_dros_genome"+"_"+period_length+"_"+extra));
+	defineConstant("pheno_file", (results_path+"pheno_avg"+"_"+simulation_info+".csv"));
+	defineConstant("generation_tracker", (results_path+"what_generation"+"_"+simulation_info+".csv"));
+	defineConstant("opt_tracking_file", results_path+"opt_tracking_"+simulation_info+".csv");
+	
+	
+	numbers_of_periods = asInteger(round(moving_gens/period_length)); //defines how many 'adaptation periods' can occur given a number of optimum shifts and the number of generations in the simulation
+	defineConstant("degree_list", rdunif(numbers_of_periods, 0, 360)); //draws a random degree for each period
+	transform_to_radians = degree_list * PI/180.0; //transforms this list of degrees to radian format
+	defineConstant("degree_list_in_radians", transform_to_radians);
+	
+	temp_female_opts = rep(0.0, numbers_of_periods);
+	temp_male_opts = rep(0.0, numbers_of_periods);
+	
+	
+	for (i in 0:(numbers_of_periods - 1)){ //loops through the list of periods in the population. 
+		//for each period, calculates the location of the new optimum based on the degree and  the location of the previous fitness optimum. It also calculates the vertical displacement of the new optimum (correponding to the shift in the female optimum) and the horizontal displacement (correponding to the shift in the male optimum).
+		
+		if (i == 0){
+			new_female_opt = 0 + distance*cos(degree_list_in_radians[0]);
+			new_male_opt = 0 + distance*sin(degree_list_in_radians[0]);
+			writeFile(opt_tracking_file, ""+new_female_opt+","+new_male_opt, append=T);
+			
+			temp_female_opts[i] = new_female_opt;
+			temp_male_opts[i] = new_male_opt;
+		
+		}
+		else{
+			lines = readFile(opt_tracking_file);
+			
+			previous_opt_line = lines[i-1];
+			fields = strsplit(previous_opt_line, ",");
+			old_female_opt= asFloat(fields[0]);
+			old_male_opt= asFloat(fields[1]);
+			
+			new_female_opt = old_female_opt + distance*sin(degree_list_in_radians[i]);
+			new_male_opt = old_male_opt + distance*cos(degree_list_in_radians[i]);
+			
+			temp_female_opts[i] = new_female_opt;
+			temp_male_opts[i] = new_male_opt;
+			
+			writeFile(opt_tracking_file,""+new_female_opt+","+new_male_opt, append=T);
+		}
+	}
+	
+	
+	defineConstant("female_opts", temp_female_opts);
+	defineConstant("male_opts", temp_male_opts);
+
+
+}
+
+
+
+1 late(){
+	sim.addSubpop("p1", N);
+	
+	
+	//As in the single genomic region simulations, the population is seeded at generation 0 with 100 mutations with randomly chosen frequencies before a 100,000 generation burn-in period. However, here different types of mutations must be added to each genomic regions. Mutations are added proportionally to the autosomes and the X based on their relative lengths. 
+	
+	all_genomes = sample(p1.individuals.genomes, asInteger(2*N));
+	
+	expected_num_mutations = 100; //u * L;
+	expected_num_x = asInteger(round(expected_num_mutations * (length_x/L)));
+	expected_num_auto = 100 - expected_num_x;
+	
+	
+	for (i in 0:(expected_num_auto-1)){
+		
+		location = length_x+(i * 10);
+		
+		freq = runif(1, 0, 1);
+		
+		target_genomes = asInteger(round(freq*2*N));
+		
+		new_mut = sample(all_genomes, target_genomes).addNewDrawnMutation(m1, asInteger(location));
+		
+		effects = rmvnorm(1, mu, sigma);
+		new_mut.setValue("e_f", effects[0]);
+		new_mut.setValue("e_m", effects[1]);
+	
+	
+	}
+	
+	females = p1.individuals[p1.individuals.sex=="F"];
+	males = p1.individuals[p1.individuals.sex=="M"];
+	
+	female_genomes = females.genomes;
+	female_genomes_shuffled = sample(female_genomes, asInteger(N));
+	male_genomes = males.genome1;
+	male_genomes_shuffled = sample(male_genomes, asInteger(round(0.5*N)));
+	
+	all_X_genomes = c(female_genomes_shuffled,male_genomes_shuffled);
+	
+	
+	for (i in 0:(expected_num_x-1)){
+		
+		location = (i * 10);
+		
+		freq=2;
+		while (freq > 1){
+			freq = runif(1, 0, 1);
+		}
+		
+		
+		target_genomes = asInteger(round(freq*1.5*N));
+		
+		new_mut = sample(all_X_genomes, target_genomes).addNewDrawnMutation(m2, asInteger(location));
+		
+		effects = rmvnorm(1, mu, sigma);
+		new_mut.setValue("e_f", effects[0]);
+		new_mut.setValue("e_m", effects[1]);
+	
+	
+	}
+
+}
+
+
+1: late(){
+	if (sim.cycle %100 ==0){
+		
+		males = p1.individuals[p1.individuals.sex=="M"];
+		females = p1.individuals[p1.individuals.sex=="F"];
+		
+		all_m2_muts = sim.mutationsOfType(m2);
+		
+		//the Y chromosome (the paternally inherited g2 genomic region in males) is not counted when we calculate the phenotype of an individual, but it does accumulate mutations. For computational speed, we wipe all mutations off the Y chromosome every 100 generations. 
+		
+		male_paternal_genomes = males.genome2;
+		
+		mutations_on_y = male_paternal_genomes.mutationsOfType(m2);
+		
+		male_paternal_genomes.removeMutations(all_m2_muts, F);
+		
+		
+		all_m2_muts = sim.mutationsOfType(m2);
+		num_m2_muts = length(all_m2_muts);
+		//This loops through all m2 (X-linked) mutations and checks if any have fixed
+		
+		for (i in 0:(num_m2_muts-1)){
+			mut = all_m2_muts[i];
+			
+			
+			freq = sim.mutationFrequencies(p1, mut);
+			
+			
+			if (freq == 0.75){
+				p1.individuals.genomes.removeMutations(mut, T);
+				//this removes X-linked mutations that have reached 75% frequency (i.e. have fixed on the X) and turns them into substitution objects
+			}
+		
+		}
+	
+	}
+
+}
+
+1 late(){
+	i = p1.individuals;
+	i[i.sex == "M"].genome2.addNewMutation(m3, 0.0, 1); //This adds a Y marker to the paternally inherited genome of all male individuals. 
+}
+
+
+modifyChild() {//this callback ensures that a female child will not inherit the Y-linked marker, and therefore the correct transmission of the X through males and females. See recipe 14.5 in the SLiM manual. 
+	if (child.sex == "F")
+		return !child.genome2.containsMarkerMutation(m3, 1);
+	else
+		return child.genome2.containsMarkerMutation(m3, 1);
+}
+
+
+
+mutation(m1) {	// draws a female and male phenotypic effect for every new autosomal mutation	
+	effects = rmvnorm(1, mu, sigma);
+	mut.setValue("e_f", effects[0]);
+	mut.setValue("e_m", effects[1]);
+	
+	return T;
+}
+
+mutation(m2) {	// draws a female and male phenotypic effect for every new X-linked mutation	
+	effects = rmvnorm(1, mu, sigma);
+	mut.setValue("e_f", effects[0]);
+	mut.setValue("e_m", effects[1]);
+	
+	return T;
+}
+
+
+
+100000: late() { //in these simulations, population average phenotypic values are recorded every generation after the burn-in period
+
+	//every 1000 generations, a generation tracker file is updated
+	if (sim.cycle%1000 == 0){
+		writeFile(generation_tracker, ""+sim.cycle, append=T);
+	}
+	
+	subs_auto = sim.substitutions[sim.substitutions.mutationType==m1];
+	subs_x = sim.substitutions[sim.substitutions.mutationType==m2];
+	
+	
+	if(size(subs_auto) == 0){
+		female_phenotype_from_subs_auto = 0;
+		male_phenotype_from_subs_auto = 0;
+	
+	}
+	else{
+		female_phenotype_from_subs_auto = 2*sum(subs_auto.getValue("e_f"));
+		male_phenotype_from_subs_auto = 2*sum(subs_auto.getValue("e_m"));
+	}
+	
+	if(size(subs_x) == 0){
+		female_phenotype_from_subs_x = 0;
+		male_phenotype_from_subs_x = 0;
+	}
+	else{
+		female_phenotype_from_subs_x = 2*sum(subs_x.getValue("e_f"));
+		male_phenotype_from_subs_x = sum(subs_x.getValue("e_m")); //because we assume no dosage compensation, the phenotype effect of X-linked subsitutions is their allelic effect (rather than their homozgyous effect)
+	}
+	
+	
+	females = p1.individuals[p1.individuals.sex == "F"];
+	males = p1.individuals[p1.individuals.sex == "M"];
+	
+	females_auto_muts = females.genomes.mutationsOfType(m1);
+	females_x_muts = females.genomes.mutationsOfType(m2);
+	females_all_muts = c(females_auto_muts, females_x_muts);
+	
+	female_average_auto_phenotype = sum(females_auto_muts.getValue("e_f"))/(size(females)) + female_phenotype_from_subs_auto;
+	
+	female_average_x_phenotype = sum(females_x_muts.getValue("e_f"))/(size(females)) + female_phenotype_from_subs_x;
+	
+	female_average_all_phenotype = sum(females_all_muts.getValue("e_f"))/(size(females)) + female_phenotype_from_subs_auto + female_phenotype_from_subs_x;
+	
+	
+	males_auto_muts = males.genomes.mutationsOfType(m1);
+	males_x_muts = males.genome1.mutationsOfType(m2); //counts X-linked mutations in males (that is mutations on the maternally inherited g2 genomic region)
+	males_all_muts = c(males_auto_muts, males_x_muts); 
+	
+	male_average_auto_phenotype = sum(males_auto_muts.getValue("e_m"))/(size(males)) + male_phenotype_from_subs_auto;
+	
+	male_average_x_phenotype = sum(males_x_muts.getValue("e_m"))/(size(males)) + male_phenotype_from_subs_x;
+	
+	male_average_all_phenotype = sum(males_all_muts.getValue("e_m"))/(size(males)) + male_phenotype_from_subs_auto + male_phenotype_from_subs_x;
+	
+	male_mut_auto_phenotype = sum(males_auto_muts.getValue("e_m"))/(size(males));
+	male_mut_x_phenotype = sum(males_x_muts.getValue("e_m"))/(size(males));
+	female_mut_auto_phenotype = sum(females_x_muts.getValue("e_f"))/(size(females));
+	female_mut_x_phenotype = sum(females_x_muts.getValue("e_f"))/(size(females));
+	
+	output = ""+female_average_all_phenotype+","+male_average_all_phenotype+","+
+		female_average_auto_phenotype+","+male_average_auto_phenotype+","+
+		female_average_x_phenotype+","+female_average_x_phenotype+","+
+		female_phenotype_from_subs_auto+","+male_phenotype_from_subs_auto+","+
+		female_phenotype_from_subs_x+","+male_phenotype_from_subs_x+","+
+		female_mut_auto_phenotype+","+male_mut_auto_phenotype+","+
+		female_mut_x_phenotype +"," + male_mut_x_phenotype;
+	
+	writeFile(pheno_file, output, append=T);
+
+
+}
+
+
+
+150000 late() {
+	
+	sim.simulationFinished();
+}
+
+
+fitnessEffect() {
+	
+	//Here we calculate the contribution of X and autosomal substitutions to the phenotype in males and females
+
+	subs_auto = sim.substitutions[sim.substitutions.mutationType==m1];
+	subs_x = sim.substitutions[sim.substitutions.mutationType==m2];
+	
+	
+	if(size(subs_auto) == 0){
+		female_phenotype_from_subs_auto = 0;
+		male_phenotype_from_subs_auto = 0;
+	
+	}
+	else{
+		female_phenotype_from_subs_auto = 2*sum(subs_auto.getValue("e_f"));
+		male_phenotype_from_subs_auto = 2*sum(subs_auto.getValue("e_m"));
+	}
+	
+	if(size(subs_x) == 0){
+		female_phenotype_from_subs_x = 0;
+		male_phenotype_from_subs_x = 0;
+	}
+	else{
+		female_phenotype_from_subs_x = 2*sum(subs_x.getValue("e_f"));
+		male_phenotype_from_subs_x = sum(subs_x.getValue("e_m")); //we assume no dosage compensation, so that the effect of a mutation in a haploid male is its allelic effect (equivalent 0.5 * its homozygous effect)
+	}
+	
+	
+	
+	//Here we calculate the contribution of X and autosomal mutations to the individuals phenotype
+	
+	muts_auto = individual.genomes.mutationsOfType(m1);
+	
+	
+	if (individual.sex == "F"){//individual is female
+		
+		mut_phenotype_auto = size(muts_auto) ? sum(muts_auto.getValue("e_f")) else 0.0;
+		
+		muts_x = individual.genomes.mutationsOfType(m2);
+		
+		
+		mut_phenotype_x = size(muts_x) ? sum(muts_x.getValue("e_f")) else 0.0;
+	
+	
+	
+	}
+	
+	else{//individual is male
+		
+		mut_phenotype_auto = size(muts_auto) ? sum(muts_auto.getValue("e_m")) else 0.0;
+		
+		muts_x = individual.genome1.mutationsOfType(m2);
+		
+		
+		mut_phenotype_x = size(muts_x) ? sum(muts_x.getValue("e_m")) else 0.0;
+	
+	
+	}
+	
+	if (sim.cycle < burn_in_gens){//during the burn in period, the optimum for males and females is 0
+		
+		if(individual.sex == "F") {
+			phenotype = female_phenotype_from_subs_auto + female_phenotype_from_subs_x + mut_phenotype_auto + mut_phenotype_x;
+			
+			fitness = dnorm(asFloat(phenotype), 0, female_sd)*sqrt(2*PI)*female_sd;
+		
+		}
+		
+		else {
+			phenotype = male_phenotype_from_subs_auto + male_phenotype_from_subs_x + mut_phenotype_auto + mut_phenotype_x;
+			fitness = dnorm(asFloat(phenotype), 0, male_sd)*sqrt(2*PI)*male_sd;
+		}
+	
+	}
+	
+		//after the 100000 generation burn-in period, males and females have different fitness optima, which change every 500 generations (see Methods).
+
+	else {
+		
+		//checks which 500 generation 'adaptive period' the population is in, and finds the male and female fitness optimum for that period
+		
+		which_period = asInteger((sim.cycle-burn_in_gens)/period_length);
+		
+		female_optimum = female_opts[which_period];
+		male_optimum = male_opts[which_period];
+		
+		if(individual.sex == "F") {
+			phenotype = female_phenotype_from_subs_auto + female_phenotype_from_subs_x + mut_phenotype_auto + mut_phenotype_x;
+			
+			fitness = dnorm(asFloat(phenotype), female_optimum, female_sd)*sqrt(2*PI)*female_sd;
+		}
+		
+		else {
+			phenotype = male_phenotype_from_subs_auto + male_phenotype_from_subs_x + mut_phenotype_auto + mut_phenotype_x;
+			
+			fitness = dnorm(asFloat(phenotype), male_optimum, male_sd)*sqrt(2*PI)*male_sd;
+		}
+	}
+	
+	return fitness;
+
+
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
