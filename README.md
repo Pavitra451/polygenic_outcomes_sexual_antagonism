@@ -13,6 +13,6 @@ In order to set up a recombination process in SLiM which corresponds to the link
 
 We have provided two possible input files for the male recombination process. The first of these, 'linkage_data_dros_male_with_male_auto_rec.txt', allows for autosomal recombination in males at rates equal to that in females (see Methods) and was used for the majority of simulations in the pre-print. The second, 'linkage_data_dros_male_no_male_auto_rec.txt', does not allow male autosomal recombination. 
 
-The last script - 'moving_optimum_Dros_like_no_X_dosage_.slim' - simulates a polygenic phenotype encoded by 1000 loci on a Drosophila melanogaster-like genome in a scenario in which the male-female fitness optimum changes every 500 generations after the burn-in period. 
+The last script - 'moving_optimum_Dros_like_no_X_dosage.slim' - simulates a polygenic phenotype encoded by 1000 loci on a Drosophila melanogaster-like genome in a scenario in which the male-female fitness optimum changes every 500 generations after the burn-in period. 
 
 All simulations in the pre-print were run in SLiM 3.3. However, since these simulations were preformed, SLiM 4 was released. This release involved changes to the syntax used in SLiM scripts. For convenience, these scripts in this repository have been updated to use the syntax of SLiM 4, rather than SLiM 3. However, the syntax changes between SLiM 3 and 4 are relatively minor and could be easily reverted if usage in SLiM 3 is preferred.
